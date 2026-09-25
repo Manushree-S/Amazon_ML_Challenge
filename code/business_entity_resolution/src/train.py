@@ -3,16 +3,15 @@ ML Challenge 2026 - Business Entity Resolution
 Model Training Module
 
 - Builds positive pairs from ground truth (S1, matched_id)
-- Efficiently retrieves true matching records across Source 2 and Source 3
+- Retrieves true matching records across Source 2 and Source 3
 - Generates hard negative pairs from unmatched candidates produced by blocking
-- Extracts rich pairwise similarity features
+- Extracts rich pairwise similarity features (RapidFuzz C++, TF-IDF cosine)
 - Trains a LightGBM classifier optimized for business entity resolution
 - Serializes trained model to disk
 """
 
 import os
 import sys
-import random
 import argparse
 from typing import Dict, List, Set, Tuple
 import pandas as pd
@@ -47,14 +46,13 @@ def load_records_by_ids(
     pool_added = 0
 
     with open(file_path, "r", encoding="utf-8") as f:
-        header_line = next(f, None)
+        next(f, None)
         for line in f:
             line_str = line.strip()
             if not line_str:
                 continue
             parts = line_str.split("\t")
             if len(parts) < 4:
-                # pad missing fields
                 parts = parts + [""] * (4 - len(parts))
             eid, name, addr, country = parts[0].strip(), parts[1], parts[2], parts[3].strip()
 
@@ -80,7 +78,7 @@ def load_records_by_ids(
 
 
 def build_training_pairs(
-    s1_df: pd.DataFrame,
+    s1_records: Dict[str, Dict[str, str]],
     s2_records: Dict[str, Dict[str, str]],
     s3_records: Dict[str, Dict[str, str]],
     gt_map: Dict[str, Set[str]],
@@ -94,25 +92,15 @@ def build_training_pairs(
     - record_lookup: dict mapping entity_id -> {business_name, business_address, country}
     """
     record_lookup = {}
-    print("Building entity record lookup...")
-
-    for _, row in s1_df.iterrows():
-        eid = str(row["entity_id"]).strip()
-        record_lookup[eid] = {
-            "business_name": str(row["business_name"]) if pd.notna(row["business_name"]) else "",
-            "business_address": str(row["business_address"]) if pd.notna(row["business_address"]) else "",
-            "country": str(row["country"]) if pd.notna(row["country"]) else "",
-        }
-
+    record_lookup.update(s1_records)
     record_lookup.update(s2_records)
     record_lookup.update(s3_records)
 
     # Build country-partitioned candidate indices for negative generation
-    unique_countries = s1_df["country"].fillna("").unique()
+    unique_countries = {r["country"] for r in s1_records.values() if r["country"]}
     indices_by_country: Dict[str, CandidateIndex] = {}
 
-    for country in unique_countries:
-        c_str = str(country)
+    for c_str in unique_countries:
         index = CandidateIndex()
         for eid, r in record_lookup.items():
             if eid.startswith(("S2-", "S3-")) and r["country"] == c_str:
@@ -123,9 +111,8 @@ def build_training_pairs(
     total_pos = 0
     total_neg = 0
 
-    for _, row in tqdm(s1_df.iterrows(), total=len(s1_df), desc="Generating training pairs"):
-        s1_id = str(row["entity_id"]).strip()
-        s1_country = str(row["country"]) if pd.notna(row["country"]) else ""
+    for s1_id, s1_data in tqdm(s1_records.items(), desc="Generating training pairs"):
+        s1_country = s1_data["country"]
         true_matches = gt_map.get(s1_id, set())
 
         # 1. Add positive pairs
@@ -139,8 +126,8 @@ def build_training_pairs(
         if index is not None:
             cands = generate_candidates_for_s1(
                 s1_id=s1_id,
-                s1_name=str(row["business_name"]) if pd.notna(row["business_name"]) else "",
-                s1_address=str(row["business_address"]) if pd.notna(row["business_address"]) else "",
+                s1_name=s1_data["business_name"],
+                s1_address=s1_data["business_address"],
                 s1_country=s1_country,
                 index=index,
                 max_candidates=max_cands_blocking
@@ -160,7 +147,7 @@ def build_training_pairs(
 def train_model(
     train_dir: str = "dataset/train",
     model_output_path: str = "models/classifier.joblib",
-    sample_size: int = 5000,
+    sample_size: int = 2500,
     max_negatives_per_entity: int = 3
 ):
     """
@@ -171,24 +158,34 @@ def train_model(
     s3_path = os.path.join(train_dir, "train_source3.tsv")
     gt_path = os.path.join(train_dir, "train_ground_truth.tsv")
 
-    print(f"Reading training S1 sample (sample_size={sample_size})...")
-    s1_df = pd.read_csv(s1_path, sep="\t", nrows=sample_size)
-    gt_map = parse_ground_truth(gt_path, nrows=sample_size)
+    print(f"Reading ground truth for sample (sample_size={sample_size})...")
+    gt_df = pd.read_csv(gt_path, sep="\t", nrows=sample_size)
 
-    # Collect all needed positive match IDs
-    target_ids = set()
-    for s1_id in s1_df["entity_id"]:
-        s1_id_str = str(s1_id).strip()
-        target_ids.update(gt_map.get(s1_id_str, set()))
-    print(f"Target match IDs to retrieve from S2/S3: {len(target_ids)}")
+    gt_map = {}
+    target_s1_ids = set()
+    target_match_ids = set()
+
+    for _, row in gt_df.iterrows():
+        s1 = str(row["source1_entity_id"]).strip()
+        matched = str(row["matched_entity_ids"]) if pd.notna(row["matched_entity_ids"]) else ""
+        ids = {x.strip() for x in matched.split(",") if x.strip()} if matched.strip() else set()
+        gt_map[s1] = ids
+        target_s1_ids.add(s1)
+        target_match_ids.update(ids)
+
+    print(f"Target S1 entities: {len(target_s1_ids)}, Target match IDs from S2/S3: {len(target_match_ids)}")
+
+    print("Retrieving S1 records from train_source1.tsv...")
+    s1_records = load_records_by_ids(s1_path, target_s1_ids, additional_pool_size=0)
+    print(f"Retrieved {len(s1_records)} S1 records.")
 
     print("Scanning S2 and S3 for matched entities and background pool...")
-    s2_records = load_records_by_ids(s2_path, target_ids, additional_pool_size=sample_size * 2)
-    s3_records = load_records_by_ids(s3_path, target_ids, additional_pool_size=sample_size * 2)
+    s2_records = load_records_by_ids(s2_path, target_match_ids, additional_pool_size=sample_size * 2)
+    s3_records = load_records_by_ids(s3_path, target_match_ids, additional_pool_size=sample_size * 2)
     print(f"Retrieved {len(s2_records)} S2 records, {len(s3_records)} S3 records.")
 
     pairs, record_lookup = build_training_pairs(
-        s1_df, s2_records, s3_records, gt_map,
+        s1_records, s2_records, s3_records, gt_map,
         max_hard_negatives=max_negatives_per_entity
     )
 
@@ -249,7 +246,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Entity Resolution Classifier")
     parser.add_argument("--train-dir", default="dataset/train", help="Directory with train TSVs")
     parser.add_argument("--model-output", default="models/classifier.joblib", help="Output path for model")
-    parser.add_argument("--sample-size", type=int, default=3000, help="Number of S1 training records to use")
+    parser.add_argument("--sample-size", type=int, default=2500, help="Number of S1 training records to use")
     parser.add_argument("--max-negatives", type=int, default=3, help="Hard negatives per entity")
     args = parser.parse_args()
 

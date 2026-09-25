@@ -44,7 +44,7 @@ def run_prediction_pipeline(
     model_path: str = "models/classifier.joblib",
     matching_output_path: str = "output/matching_results.tsv",
     candidate_output_path: str = "output/candidate_pairs.tsv",
-    threshold: float = 0.65,
+    threshold: float = 0.75,
     max_candidates: int = 20,
     max_s1_eval: Optional[int] = None,
     s2_s3_pool_size: Optional[int] = None,
@@ -214,7 +214,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-path", default="models/classifier.joblib", help="Path to trained model")
     parser.add_argument("--matching-output", default="output/matching_results.tsv", help="Output path for matching_results.tsv")
     parser.add_argument("--candidate-output", default="output/candidate_pairs.tsv", help="Output path for candidate_pairs.tsv")
-    parser.add_argument("--threshold", type=float, default=0.65, help="Decision threshold for match probability")
+    parser.add_argument("--threshold", type=float, default=0.75, help="Decision threshold for match probability")
     parser.add_argument("--max-candidates", type=int, default=20, help="Max candidates per entity")
     parser.add_argument("--max-s1-eval", type=int, default=None, help="Max S1 entities to score (default all)")
     parser.add_argument("--pool-size", type=int, default=None, help="Max S2/S3 records to load into pool (default all)")

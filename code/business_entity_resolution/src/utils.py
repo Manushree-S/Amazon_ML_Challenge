@@ -4,6 +4,7 @@ Utility Functions Module
 
 Contains:
 - Exact Macro F_0.5 evaluation metric implementation (challenge specified)
+- Breakdown of scores for singletons vs entities with true matches
 - TSV readers & writers conforming to strict format rules
 - Validation and formatting utilities
 """
@@ -52,34 +53,49 @@ def compute_macro_f05(
 ) -> Dict[str, float]:
     """
     Compute macro-averaged F_0.5 across all Source 1 entities in the evaluation set.
+    Also provides granular breakdown for singletons vs matched entities.
     """
     if s1_entities is None:
         s1_entities = list(ground_truth.keys())
 
-    precisions = []
-    recalls = []
-    f05_scores = []
-    singleton_count = 0
-    singleton_correct = 0
+    all_precisions = []
+    all_recalls = []
+    all_f05_scores = []
+
+    singleton_f05 = []
+    matched_f05 = []
+    matched_precisions = []
+    matched_recalls = []
 
     for s1_id in s1_entities:
         true_matches = ground_truth.get(s1_id, set())
         pred_matches = predictions.get(s1_id, set())
 
         p, r, f = compute_f05_single(true_matches, pred_matches)
-        precisions.append(p)
-        recalls.append(r)
-        f05_scores.append(f)
+        all_precisions.append(p)
+        all_recalls.append(r)
+        all_f05_scores.append(f)
 
         if len(true_matches) == 0:
-            singleton_count += 1
-            if len(pred_matches) == 0:
-                singleton_correct += 1
+            # Singleton
+            singleton_f05.append(f)
+        else:
+            # Has true matches
+            matched_f05.append(f)
+            matched_precisions.append(p)
+            matched_recalls.append(r)
 
-    macro_f05 = float(np.mean(f05_scores)) if f05_scores else 0.0
-    macro_precision = float(np.mean(precisions)) if precisions else 0.0
-    macro_recall = float(np.mean(recalls)) if recalls else 0.0
-    singleton_acc = (singleton_correct / singleton_count) if singleton_count > 0 else 1.0
+    macro_f05 = float(np.mean(all_f05_scores)) if all_f05_scores else 0.0
+    macro_precision = float(np.mean(all_precisions)) if all_precisions else 0.0
+    macro_recall = float(np.mean(all_recalls)) if all_recalls else 0.0
+
+    singleton_count = len(singleton_f05)
+    singleton_acc = float(np.mean(singleton_f05)) if singleton_f05 else 1.0
+
+    matched_count = len(matched_f05)
+    matched_macro_f05 = float(np.mean(matched_f05)) if matched_f05 else 0.0
+    matched_macro_p = float(np.mean(matched_precisions)) if matched_precisions else 0.0
+    matched_macro_r = float(np.mean(matched_recalls)) if matched_recalls else 0.0
 
     return {
         "macro_f05": macro_f05,
@@ -87,7 +103,11 @@ def compute_macro_f05(
         "macro_recall": macro_recall,
         "total_evaluated": len(s1_entities),
         "singleton_count": singleton_count,
-        "singleton_accuracy": singleton_acc,
+        "singleton_f05": singleton_acc,
+        "matched_entity_count": matched_count,
+        "matched_macro_f05": matched_macro_f05,
+        "matched_macro_precision": matched_macro_p,
+        "matched_macro_recall": matched_macro_r,
     }
 
 

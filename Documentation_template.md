@@ -77,16 +77,19 @@ We employ a two-stage **Blocking + Machine Learning Classifier** framework:
 - **Hard Negative Sampling**: Negative training pairs are drawn from unmatched blocking candidates, ensuring the classifier learns boundary discrimination between true matches and confusing competitors.
 - **Threshold Optimization**: The Macro \(F_{0.5}\) metric weights precision \(2\times\) over recall:
   $$F_{0.5} = \frac{1.25 \times \text{Precision} \times \text{Recall}}{0.25 \times \text{Precision} + \text{Recall}}$$
-  Singletons score \(1.0\) on empty prediction and \(0.0\) on any false positive. We swept \(\tau \in [0.30, 0.90]\) on the holdout set; an optimal threshold of \(\tau^* \approx 0.65\) strongly penalizes spurious merges, maximizing the competition objective.
+  Singletons score \(1.0\) on empty prediction and \(0.0\) on any false positive. We swept \(\tau \in [0.50, 0.85]\) on the holdout set; an optimal threshold of \(\tau^* = 0.75\) strongly penalizes spurious merges, maximizing the competition objective.
 
 ---
 
 ## 5. Results & Error Analysis
 
-- **Macro \(F_{0.5}\) Score (Holdout)**: **0.912**
-- **Macro Precision**: 0.941
-- **Macro Recall**: 0.814
-- **Singleton Accuracy**: 98.4%
+- **Macro \(F_{0.5}\) Score (Holdout)**: **0.9258**
+- **Macro Precision**: **0.9666**
+- **Macro Recall**: **0.8502**
+- **Singleton Accuracy (Empty=1.0)**: **96.15%** (25/26 correct singletons)
+- **Matched Entities \(F_{0.5}\)**: **0.9239**
+- **Blocking Candidates per Entity**: **15.21**
+- **Blocking Recall Ceiling on Holdout**: **84.80%** (1,473 / 1,737 true matches captured)
 - **Common False Positives**:
   - Distinct businesses operating at the same commercial mall/complex or shared building address with generic trading names (e.g. `City Retail` vs. `City Electronics`).
 - **Common False Negatives**:
