@@ -1,0 +1,8 @@
+dataset/
+*.tsv
+!Documentation_template.md
+__pycache__/
+*.pyc
+models/
+*.joblib
+*.pkl
