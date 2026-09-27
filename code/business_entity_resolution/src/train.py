@@ -189,15 +189,44 @@ def train_model(
 
     total_gt_rows = count_gt_rows(gt_path)
     train_cutoff = int(total_gt_rows * (1 - holdout_fraction))
-    effective_sample_size = min(sample_size, train_cutoff)
     print(
         f"Ground truth has {total_gt_rows} total rows. Reserving last "
         f"{holdout_fraction*100:.0f}% ({total_gt_rows - train_cutoff} rows) as holdout "
-        f"-- training will only read rows before index {train_cutoff}."
+        f"-- training will only draw from rows before index {train_cutoff}."
     )
-    print(f"Reading ground truth (requested sample_size={sample_size}, "
-          f"capped at {effective_sample_size} to respect holdout reserve)...")
-    gt_df = pd.read_csv(gt_path, sep="\t", nrows=effective_sample_size)
+
+    # HARD CAP on actual training entities used, independent of what sample_size
+    # requests. Loading full record data (name/address/country) for every
+    # eligible S1 entity plus its true matches does not scale to millions of
+    # entities in plain Python dicts -- this is what caused the 4.6GB+ OOM at
+    # full-dataset scale. A gradient-boosted classifier over ~21 hand-crafted
+    # similarity features saturates well before millions of examples, so a
+    # large *random* sample gives comparable model quality at a fraction of
+    # the memory. MAX_TRAINABLE_ENTITIES below is deliberately generous
+    # (200k) but still bounded; raise it only if you've confirmed available
+    # RAM can absorb it (~2-3KB per entity across the record dicts + pairs).
+    MAX_TRAINABLE_ENTITIES = 200000
+    effective_sample_size = min(sample_size, train_cutoff, MAX_TRAINABLE_ENTITIES)
+    if sample_size > MAX_TRAINABLE_ENTITIES:
+        print(
+            f"WARNING: requested sample_size={sample_size} exceeds the safe cap "
+            f"of {MAX_TRAINABLE_ENTITIES} trainable entities. Capping to "
+            f"{MAX_TRAINABLE_ENTITIES} and drawing a RANDOM sample from the "
+            f"{train_cutoff} eligible rows (not just the first N) so the training "
+            f"set stays representative. Override MAX_TRAINABLE_ENTITIES in code "
+            f"if you have confirmed enough RAM for a larger run."
+        )
+
+    print(f"Reading eligible ground truth rows (up to cutoff {train_cutoff})...")
+    gt_eligible_df = pd.read_csv(gt_path, sep="\t", nrows=train_cutoff)
+
+    if effective_sample_size < len(gt_eligible_df):
+        gt_df = gt_eligible_df.sample(n=effective_sample_size, random_state=42)
+        print(f"Randomly sampled {effective_sample_size} of {len(gt_eligible_df)} "
+              f"eligible rows for training.")
+    else:
+        gt_df = gt_eligible_df
+    del gt_eligible_df
 
     gt_map = {}
     target_s1_ids = set()
