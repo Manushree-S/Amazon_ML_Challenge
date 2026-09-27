@@ -19,6 +19,17 @@ import numpy as np
 import lightgbm as lgb
 import joblib
 from tqdm import tqdm
+import psutil
+
+process = psutil.Process(os.getpid())
+peak_rss_mb = 0.0
+
+def track_memory() -> float:
+    global peak_rss_mb
+    rss = process.memory_info().rss / (1024 * 1024)
+    if rss > peak_rss_mb:
+        peak_rss_mb = rss
+    return rss
 
 try:
     from .preprocess import normalize_business_name, normalize_address
@@ -111,7 +122,11 @@ def build_training_pairs(
     total_pos = 0
     total_neg = 0
 
-    for s1_id, s1_data in tqdm(s1_records.items(), desc="Generating training pairs"):
+    pbar = tqdm(s1_records.items(), desc="Generating training pairs")
+    for idx_item, (s1_id, s1_data) in enumerate(pbar):
+        if idx_item % 5000 == 0:
+            rss_mb = track_memory()
+            pbar.set_postfix(rss_mb=f"{rss_mb:.1f}")
         s1_country = s1_data["country"]
         true_matches = gt_map.get(s1_id, set())
 
@@ -144,22 +159,45 @@ def build_training_pairs(
     return pairs, record_lookup
 
 
+def count_gt_rows(gt_path: str) -> int:
+    """Count data rows (excluding header) in the ground truth TSV without
+    loading it fully into a DataFrame."""
+    with open(gt_path, "r", encoding="utf-8") as f:
+        return sum(1 for _ in f) - 1
+
+
 def train_model(
     train_dir: str = "dataset/train",
     model_output_path: str = "models/classifier.joblib",
     sample_size: int = 2500,
-    max_negatives_per_entity: int = 3
+    max_negatives_per_entity: int = 3,
+    holdout_fraction: float = 0.15
 ):
     """
     Train LightGBM entity resolution classifier.
+
+    To prevent train/holdout leakage, a fixed fraction (holdout_fraction) of
+    ground truth rows is ALWAYS reserved at the tail of the file and never
+    read for training, regardless of sample_size. validate_holdout.py uses
+    the same convention by default, so the two scripts agree on a
+    non-overlapping split without needing manually-coordinated offsets.
     """
     s1_path = os.path.join(train_dir, "train_source1.tsv")
     s2_path = os.path.join(train_dir, "train_source2.tsv")
     s3_path = os.path.join(train_dir, "train_source3.tsv")
     gt_path = os.path.join(train_dir, "train_ground_truth.tsv")
 
-    print(f"Reading ground truth for sample (sample_size={sample_size})...")
-    gt_df = pd.read_csv(gt_path, sep="\t", nrows=sample_size)
+    total_gt_rows = count_gt_rows(gt_path)
+    train_cutoff = int(total_gt_rows * (1 - holdout_fraction))
+    effective_sample_size = min(sample_size, train_cutoff)
+    print(
+        f"Ground truth has {total_gt_rows} total rows. Reserving last "
+        f"{holdout_fraction*100:.0f}% ({total_gt_rows - train_cutoff} rows) as holdout "
+        f"-- training will only read rows before index {train_cutoff}."
+    )
+    print(f"Reading ground truth (requested sample_size={sample_size}, "
+          f"capped at {effective_sample_size} to respect holdout reserve)...")
+    gt_df = pd.read_csv(gt_path, sep="\t", nrows=effective_sample_size)
 
     gt_map = {}
     target_s1_ids = set()
@@ -179,9 +217,15 @@ def train_model(
     s1_records = load_records_by_ids(s1_path, target_s1_ids, additional_pool_size=0)
     print(f"Retrieved {len(s1_records)} S1 records.")
 
-    print("Scanning S2 and S3 for matched entities and background pool...")
-    s2_records = load_records_by_ids(s2_path, target_match_ids, additional_pool_size=sample_size * 2)
-    s3_records = load_records_by_ids(s3_path, target_match_ids, additional_pool_size=sample_size * 2)
+    # Cap the background/negative pool at a fixed size regardless of sample_size.
+    # This pool exists only to give the blocking index enough S2/S3 volume to
+    # mine hard negatives from -- it does not need to scale with the number of
+    # S1 training entities, and letting it do so (sample_size * 2, previously)
+    # caused unbounded memory growth at full-dataset scale.
+    pool_size = min(sample_size * 2, 50000)
+    print(f"Scanning S2 and S3 for matched entities and background pool (pool cap={pool_size})...")
+    s2_records = load_records_by_ids(s2_path, target_match_ids, additional_pool_size=pool_size)
+    s3_records = load_records_by_ids(s3_path, target_match_ids, additional_pool_size=pool_size)
     print(f"Retrieved {len(s2_records)} S2 records, {len(s3_records)} S3 records.")
 
     pairs, record_lookup = build_training_pairs(
@@ -197,7 +241,11 @@ def train_model(
     X = []
     y = []
 
-    for s1_id, cand_id, label in tqdm(pairs, desc="Extracting features"):
+    pbar_feat = tqdm(pairs, desc="Extracting features")
+    for idx_pair, (s1_id, cand_id, label) in enumerate(pbar_feat):
+        if idx_pair % 10000 == 0:
+            rss_mb = track_memory()
+            pbar_feat.set_postfix(rss_mb=f"{rss_mb:.1f}")
         r1 = record_lookup[s1_id]
         r2 = record_lookup[cand_id]
         feat = fe.extract_pair_features(
@@ -239,6 +287,7 @@ def train_model(
     os.makedirs(os.path.dirname(os.path.abspath(model_output_path)), exist_ok=True)
     joblib.dump(model, model_output_path)
     print(f"\nModel saved successfully to {model_output_path}!")
+    print(f"Peak memory during training: {peak_rss_mb:.1f} MB")
     return model
 
 
@@ -246,13 +295,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Entity Resolution Classifier")
     parser.add_argument("--train-dir", default="dataset/train", help="Directory with train TSVs")
     parser.add_argument("--model-output", default="models/classifier.joblib", help="Output path for model")
-    parser.add_argument("--sample-size", type=int, default=2500, help="Number of S1 training records to use")
+    parser.add_argument("--sample-size", type=int, default=2500, help="Number of S1 training records to use (capped to respect holdout reserve)")
     parser.add_argument("--max-negatives", type=int, default=3, help="Hard negatives per entity")
+    parser.add_argument("--holdout-fraction", type=float, default=0.15, help="Fraction of ground truth reserved as holdout tail, never used for training")
     args = parser.parse_args()
 
     train_model(
         train_dir=args.train_dir,
         model_output_path=args.model_output,
         sample_size=args.sample_size,
-        max_negatives_per_entity=args.max_negatives
+        max_negatives_per_entity=args.max_negatives,
+        holdout_fraction=args.holdout_fraction
     )
