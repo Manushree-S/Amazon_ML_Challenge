@@ -7,3 +7,4 @@ models/
 *.joblib
 *.pkl
 .venv/
+Amazon_ML_Challenge/

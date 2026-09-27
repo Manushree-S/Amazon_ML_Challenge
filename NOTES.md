@@ -79,8 +79,14 @@ Both `train.py` and `validate_holdout.py` implement an automated, leakage-free 8
 ---
 
 ## 4. Test Outputs & Validation
-- **`output/matching_results.tsv`**: 1,732,544 rows (matches generated with tuned threshold 0.80).
+- **`output/matching_results.tsv`**: 1,732,544 rows (exactly 1 header + 1,732,544 S1 rows).
+  - Non-empty matches: **7,116 rows** (**14,500 total matched IDs**).
+  - Empty singletons: **1,725,428 rows** (clean tab-separated empty string).
 - **`output/candidate_pairs.tsv`**: 1,732,544 rows.
-- **Validation**:
-  - `python utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/test --check-ids`
+  - Non-empty candidate lists: **12,157 rows**.
+- **Submission Validation (`utils/validate_submission.py --check-ids`)**:
+  - Valid S2/S3 match IDs verified: **9,969,589**
   - Result: **`PASS — no blocking issues found. Safe to submit.`**
+- **Submission Archives Generated**:
+  - `EntityResolversSubmission.zip` (18.88 MB)
+  - `EntityResolvers_submission.zip` (18.88 MB)
